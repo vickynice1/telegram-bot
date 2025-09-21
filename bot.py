@@ -725,7 +725,7 @@ async def handle_profile(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         if user:
             balance_tokens = float(user['balance'])
-                        referrals = supabase.table('referrals').select('*').eq('inviter', user_id).execute()
+            referrals = supabase.table('referrals').select('*').eq('inviter', user_id).execute()
             referral_count = len(referrals.data) if referrals.data else 0
             
             username = user['username'] or 'N/A'
@@ -1295,4 +1295,3 @@ def main():
 
 if __name__ == '__main__':
     main()
-
