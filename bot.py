@@ -1182,11 +1182,15 @@ def main():
         logger.info(f"🔗 Connected to: {BSC_NODE_URL}")
         logger.info(f"📄 Contract: {CONTRACT_ADDRESS or 'Not configured'}")
         
-        # Start bot
-        application.run_polling(drop_pending_updates=True)
+        # Start bot with proper async handling
+        application.run_polling(
+            drop_pending_updates=True,
+            allowed_updates=Update.ALL_TYPES
+        )
         
     except Exception as e:
         logger.error(f"Failed to start bot: {e}")
+        raise
 
 if __name__ == '__main__':
     main()
