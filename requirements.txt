@@ -3,3 +3,4 @@ supabase==2.3.4
 web3==6.11.3
 python-dotenv==1.0.0
 requests==2.31.0
+setuptools>=65.0.0
