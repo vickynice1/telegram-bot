@@ -54,10 +54,9 @@ logger = logging.getLogger(__name__)
 
 # Keyboards
 MAIN_KEYBOARD = ReplyKeyboardMarkup([
-    ['🎯 Join Groups', '🔗 Referral Link'],
-    ['💰 Balance', '💳 Set Wallet'],
-    ['🏦 Withdraw', '👤 My Profile'],
-    ['❓ Help']
+    ['🔗 Referral Link', '💰 Balance'],
+    ['💳 Set Wallet', '🏦 Withdraw'],
+    ['👤 My Profile', '❓ Help']
 ], resize_keyboard=True)
 
 GROUPS_KEYBOARD = ReplyKeyboardMarkup([
@@ -91,6 +90,8 @@ def rate_limit_check(user_id):
 
 def escape_markdown_v2(text):
     """Escape special characters for Markdown V2"""
+    if text is None:
+        return "N/A"
     escape_chars = r'_*[]()~`>#+-=|{}.!'
     return ''.join(f'\\{char}' if char in escape_chars else char for char in str(text))
 
@@ -106,19 +107,22 @@ def get_user(user_id):
 def get_settings():
     try:
         result = supabase.table('settings').select('*').execute()
-        return result.data[0] if result.data else {
-            'signup_bonus': Decimal('1000'),
-            'referral_bonus': Decimal('4000'),
-            'group_join_bonus': Decimal('500'),
-            'min_withdraw_amount': Decimal('4000')
-        }
+        if result.data:
+            return result.data[0]
+        else:
+            return {
+                'signup_bonus': 1000,
+                'referral_bonus': 4000,
+                'group_join_bonus': 500,
+                'min_withdraw_amount': 4000
+            }
     except Exception as e:
         logger.error(f"Error getting settings: {e}")
         return {
-            'signup_bonus': Decimal('1000'),
-            'referral_bonus': Decimal('4000'),
-            'group_join_bonus': Decimal('500'),
-            'min_withdraw_amount': Decimal('4000')
+            'signup_bonus': 1000,
+            'referral_bonus': 4000,
+            'group_join_bonus': 500,
+            'min_withdraw_amount': 4000
         }
 
 def create_user(user_id, username, full_name, invited_by=None):
@@ -131,7 +135,12 @@ def create_user(user_id, username, full_name, invited_by=None):
             'username': username,
             'full_name': full_name,
             'invited_by': invited_by,
-            'balance': str(signup_bonus)
+            'balance': str(signup_bonus),
+            'joined_all_groups': False,
+            'telegram_handle': username,
+            'twitter_handle': None,
+            'has_received_signup_bonus': True,
+            'has_received_group_bonus': False
         }
         
         result = supabase.table('users').insert(user_data).execute()
@@ -202,6 +211,18 @@ def is_valid_bsc_address(address):
     """Validate BSC wallet address"""
     return re.match(r'^0x[a-fA-F0-9]{40}$', address) is not None
 
+def is_valid_telegram_handle(handle):
+    """Validate Telegram handle"""
+    if handle.startswith('@'):
+        handle = handle[1:]
+    return re.match(r'^[a-zA-Z0-9_]{5,32}$', handle) is not None
+
+def is_valid_twitter_handle(handle):
+    """Validate Twitter handle"""
+    if handle.startswith('@'):
+        handle = handle[1:]
+    return re.match(r'^[a-zA-Z0-9_]{1,15}$', handle) is not None
+
 # Command handlers
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
@@ -224,35 +245,52 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         # Get or create user
         db_user = get_user(user_id)
+        
         if not db_user:
+            # New user - start onboarding process
             db_user = create_user(user_id, user.username, user.full_name, invited_by)
             if db_user:
-                welcome_msg = "🎉 *Welcome to MetaCore Airdrop\\!*\n\n"
-                welcome_msg += "✅ You received 1000 MetaCore signup bonus\\!\n\n"
+                welcome_msg = "🎉 Welcome to MetaCore Airdrop!\n\n"
+                welcome_msg += "✅ You received 1000 MetaCore signup bonus!\n\n"
                 if invited_by:
-                    welcome_msg += "🎁 Referral bonus credited to your referrer\\!\n\n"
+                    welcome_msg += "🎁 Referral bonus credited to your referrer!\n\n"
+                welcome_msg += "Let's get you set up! First, please provide your Telegram handle:"
+                
+                user_states[user_id] = UserState.SETTING_TELEGRAM
+                await update.message.reply_text(welcome_msg)
+                return
             else:
-                welcome_msg = "❌ Error creating account\\. Please try again\\.\n\n"
+                await update.message.reply_text("❌ Error creating account. Please try again.")
+                return
         else:
-            welcome_msg = "👋 *Welcome back to MetaCore Airdrop\\!*\n\n"
-        
-        welcome_msg += "📋 *To participate:*\n"
-        welcome_msg += "1️⃣ Join our required groups\n"
-        welcome_msg += "2️⃣ Set your BSC wallet address\n"
-        welcome_msg += "3️⃣ Share referral link \\(4000 MetaCore per referral\\!\\)\n"
-        welcome_msg += "4️⃣ Withdraw when you have 4000\\+ tokens\n\n"
-        welcome_msg += "Choose an option below:"
-        
-        user_states[user_id] = UserState.MAIN
-        await update.message.reply_text(
-            welcome_msg, 
-            reply_markup=MAIN_KEYBOARD,
-            parse_mode=ParseMode.MARKDOWN_V2
-        )
+            # Existing user - check if they completed onboarding
+            if not db_user.get('joined_all_groups', False):
+                # User hasn't completed group joining
+                if not db_user.get('telegram_handle') or not db_user.get('twitter_handle'):
+                    # Complete profile setup first
+                    if not db_user.get('telegram_handle'):
+                        user_states[user_id] = UserState.SETTING_TELEGRAM
+                        await update.message.reply_text("👋 Welcome back! Please provide your Telegram handle:")
+                        return
+                    elif not db_user.get('twitter_handle'):
+                        user_states[user_id] = UserState.SETTING_TWITTER
+                        await update.message.reply_text("👋 Welcome back! Please provide your Twitter handle:")
+                        return
+                else:
+                    # Profile complete, need to join groups
+                    await handle_join_groups(update, context)
+                    return
+            else:
+                # User completed everything - show main menu
+                welcome_msg = "👋 Welcome back to MetaCore Airdrop!\n\n"
+                welcome_msg += "Choose an option below:"
+                
+                user_states[user_id] = UserState.MAIN
+                await update.message.reply_text(welcome_msg, reply_markup=MAIN_KEYBOARD)
         
     except Exception as e:
         logger.error(f"Error in start command: {e}")
-        await update.message.reply_text("❌ An error occurred\\. Please try again\\.", parse_mode=ParseMode.MARKDOWN_V2)
+        await update.message.reply_text("❌ An error occurred. Please try again.")
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
@@ -264,9 +302,22 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text("⚠️ Please wait before sending another command")
             return
         
-        if text == '🎯 Join Groups':
-            await handle_join_groups(update, context)
-        elif text == '🔗 Referral Link':
+        # Handle states first
+        if state == UserState.SETTING_TELEGRAM:
+            await process_telegram_handle(update, context)
+            return
+        elif state == UserState.SETTING_TWITTER:
+            await process_twitter_handle(update, context)
+            return
+        elif state == UserState.SETTING_WALLET:
+            await process_wallet_address(update, context)
+            return
+        elif state == UserState.WITHDRAWING:
+            await process_withdrawal_amount(update, context)
+            return
+        
+        # Handle menu buttons
+        if text == '🔗 Referral Link':
             await handle_referral_link(update, context)
         elif text == '💰 Balance':
             await handle_balance(update, context)
@@ -282,41 +333,117 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await verify_group_membership(update, context)
         elif text == '🔙 Back to Menu':
             user_states[user_id] = UserState.MAIN
-            await update.message.reply_text("📋 *Main Menu:*", reply_markup=MAIN_KEYBOARD, parse_mode=ParseMode.MARKDOWN_V2)
-        elif state == UserState.SETTING_WALLET:
-            await process_wallet_address(update, context)
-        elif state == UserState.WITHDRAWING:
-            await process_withdrawal_amount(update, context)
+            await update.message.reply_text("📋 Main Menu:", reply_markup=MAIN_KEYBOARD)
             
     except Exception as e:
         logger.error(f"Error handling message: {e}")
-        await update.message.reply_text("❌ An error occurred\\. Please try again\\.", parse_mode=ParseMode.MARKDOWN_V2)
+        await update.message.reply_text("❌ An error occurred. Please try again.")
+
+async def process_telegram_handle(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    try:
+        user_id = update.effective_user.id
+        handle = update.message.text.strip()
+        
+        if is_valid_telegram_handle(handle):
+            # Remove @ if present
+            if handle.startswith('@'):
+                handle = handle[1:]
+            
+            # Update user's telegram handle
+            supabase.table('users').update({'telegram_handle': handle}).eq('id', user_id).execute()
+            
+            # Move to Twitter handle
+            user_states[user_id] = UserState.SETTING_TWITTER
+            await update.message.reply_text(
+                f"✅ Telegram handle saved: @{handle}\n\n"
+                "Now, please provide your Twitter handle:"
+            )
+        else:
+            await update.message.reply_text(
+                "❌ Invalid Telegram handle!\n\n"
+                "Please provide a valid handle:\n"
+                "• Can start with @ (optional)\n"
+                "• 5-32 characters\n"
+                "• Only letters, numbers, and underscores\n\n"
+                "Example: @username or username"
+            )
+    except Exception as e:
+        logger.error(f"Error processing telegram handle: {e}")
+        await update.message.reply_text("❌ Error saving Telegram handle.")
+
+async def process_twitter_handle(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    try:
+        user_id = update.effective_user.id
+        handle = update.message.text.strip()
+        
+        if is_valid_twitter_handle(handle):
+            # Remove @ if present
+            if handle.startswith('@'):
+                handle = handle[1:]
+            
+            # Update user's twitter handle
+            supabase.table('users').update({'twitter_handle': handle}).eq('id', user_id).execute()
+            
+            # Move to group joining
+            await update.message.reply_text(
+                f"✅ Twitter handle saved: @{handle}\n\n"
+                "Great! Now let's join the required groups."
+            )
+            
+            # Automatically show groups
+            await handle_join_groups(update, context)
+            
+        else:
+            await update.message.reply_text(
+                "❌ Invalid Twitter handle!\n\n"
+                "Please provide a valid handle:\n"
+                "• Can start with @ (optional)\n"
+                "• 1-15 characters\n"
+                "• Only letters, numbers, and underscores\n\n"
+                "Example: @username or username"
+            )
+    except Exception as e:
+        logger.error(f"Error processing twitter handle: {e}")
+        await update.message.reply_text("❌ Error saving Twitter handle.")
 
 async def handle_join_groups(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     user_states[user_id] = UserState.JOINING_GROUPS
     
-    msg = "📢 *Join ALL these groups to participate:*\n\n"
+    msg = "📢 Join ALL these groups to participate:\n\n"
     msg += "1️⃣ [MetaCore Official](https://t.me/MetaaCore)\n"
     msg += "2️⃣ [Bot News](https://t.me/botnewz1)\n" 
     msg += "3️⃣ [MetaCore Community](https://t.me/MetaaCore)\n\n"
-    msg += "⚠️ You must join ALL groups\\!\n"
+    msg += "⚠️ You must join ALL groups!\n"
     msg += "After joining, click the button below:"
     
-    await update.message.reply_text(
-        msg, 
-        reply_markup=GROUPS_KEYBOARD, 
-        parse_mode=ParseMode.MARKDOWN_V2
-    )
+    await update.message.reply_text(msg, reply_markup=GROUPS_KEYBOARD)
 
 async def verify_group_membership(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     
-    # For testing, skip group check (remove this when groups are ready)
-    if True:  # Change to: if await check_group_membership(context, user_id):
-        try:
-            # Update user as verified
-            supabase.table('users').update({'joined_all_groups': True}).eq('id', user_id).execute()
+    try:
+        user = get_user(user_id)
+        if not user:
+            await update.message.reply_text("❌ User not found.")
+            return
+        
+        # Check if user already received group bonus
+        if user.get('has_received_group_bonus', False):
+            msg = "✅ You have already joined all groups and received your bonus!\n\n"
+            msg += "Welcome to the main menu:"
+            
+            user_states[user_id] = UserState.MAIN
+            await update.message.reply_text(msg, reply_markup=MAIN_KEYBOARD)
+            return
+        
+        # For testing, skip actual group check (remove this when groups are ready)
+        if True:  # Change to: if await check_group_membership(context, user_id):
+            # Update user as verified and mark bonus as received
+            supabase.table('users').update({
+                'joined_all_groups': True,
+                'has_received_group_bonus': True
+            }).eq('id', user_id).execute()
             
             # Get group join bonus
             settings = get_settings()
@@ -330,26 +457,22 @@ async def verify_group_membership(update: Update, context: ContextTypes.DEFAULT_
                 'description_param': 'Group join bonus'
             }).execute()
             
-            msg = "✅ *Excellent\\! You joined all groups\\.*\n\n"
-            msg += "🎁 You earned 500 MetaCore bonus\\!\n\n"
-            msg += "Now set your BSC wallet address to receive tokens\\."
+            msg = "✅ Excellent! You joined all groups.\n\n"
+            msg += f"🎁 You earned {bonus} MetaCore bonus!\n\n"
+            msg += "Now you can access the main menu. Set your BSC wallet address to receive tokens."
             
             user_states[user_id] = UserState.MAIN
+            await update.message.reply_text(msg, reply_markup=MAIN_KEYBOARD)
+            
+        else:
             await update.message.reply_text(
-                msg, 
-                reply_markup=MAIN_KEYBOARD,
-                parse_mode=ParseMode.MARKDOWN_V2
+                "❌ You haven't joined all required groups yet.\nPlease join ALL groups first!",
+                reply_markup=GROUPS_KEYBOARD
             )
             
-        except Exception as e:
-            logger.error(f"Error verifying membership: {e}")
-            await update.message.reply_text("❌ Error updating your status\\. Please try again\\.", parse_mode=ParseMode.MARKDOWN_V2)
-    else:
-        await update.message.reply_text(
-            "❌ You haven't joined all required groups yet\\.\nPlease join ALL groups first\\!",
-            reply_markup=GROUPS_KEYBOARD,
-            parse_mode=ParseMode.MARKDOWN_V2
-        )
+    except Exception as e:
+        logger.error(f"Error verifying membership: {e}")
+        await update.message.reply_text("❌ Error updating your status. Please try again.")
 
 async def handle_referral_link(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
@@ -362,19 +485,19 @@ async def handle_referral_link(update: Update, context: ContextTypes.DEFAULT_TYP
         referrals = supabase.table('referrals').select('*').eq('inviter', user_id).execute()
         referral_count = len(referrals.data) if referrals.data else 0
         
-        msg = f"🔗 *Your Referral Link:*\n"
-        msg += f"`{escape_markdown_v2(referral_link)}`\n\n"
-        msg += f"📊 *Your Stats:*\n"
+        msg = f"🔗 Your Referral Link:\n"
+        msg += f"{referral_link}\n\n"
+        msg += f"📊 Your Stats:\n"
         msg += f"👥 Referrals: {referral_count}\n"
         msg += f"💰 Earned: {referral_count * 4000:,} MetaCore\n\n"
-        msg += f"💡 *Earn 4000 MetaCore \\(~$90\\) per referral\\!*\n\n"
-        msg += f"Share this link with friends to earn more tokens\\!"
+        msg += f"💡 Earn 4000 MetaCore (~$90) per referral!\n\n"
+        msg += f"Share this link with friends to earn more tokens!"
         
-        await update.message.reply_text(msg, parse_mode=ParseMode.MARKDOWN_V2)
+        await update.message.reply_text(msg)
         
     except Exception as e:
         logger.error(f"Error in referral link: {e}")
-        await update.message.reply_text("❌ Error generating referral link\\.", parse_mode=ParseMode.MARKDOWN_V2)
+        await update.message.reply_text("❌ Error generating referral link.")
 
 async def handle_balance(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
@@ -384,41 +507,41 @@ async def handle_balance(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if user:
             balance_tokens = float(user['balance'])
             
-            msg = f"💰 *Your MetaCore Balance*\n\n"
+            msg = f"💰 Your MetaCore Balance\n\n"
             msg += f"🪙 {balance_tokens:,.0f} MetaCore\n"
             msg += f"💵 ≈ ${balance_tokens * 0.0225:,.2f} USD\n\n"
             
             if user['metacore_address']:
                 address = user['metacore_address']
-                msg += f"📍 Wallet: `{escape_markdown_v2(address[:6])}...{escape_markdown_v2(address[-4:])}`"
+                msg += f"📍 Wallet: {address[:6]}...{address[-4:]}"
             else:
-                msg += f"⚠️ No wallet set \\- please set your BSC address\\!"
+                msg += f"⚠️ No wallet set - please set your BSC address!"
         else:
-            msg = "❌ User not found\\. Please /start first\\."
+            msg = "❌ User not found. Please /start first."
         
-        await update.message.reply_text(msg, parse_mode=ParseMode.MARKDOWN_V2)
+        await update.message.reply_text(msg)
         
     except Exception as e:
         logger.error(f"Error in balance: {e}")
-        await update.message.reply_text("❌ Error getting balance\\.", parse_mode=ParseMode.MARKDOWN_V2)
+        await update.message.reply_text("❌ Error getting balance.")
 
 async def handle_set_wallet(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     user_states[user_id] = UserState.SETTING_WALLET
     
-    msg = "💳 *Set Your BSC Wallet Address*\n\n"
-    msg += "⚠️ Send your MetaCore \\(BEP\\-20\\) wallet address\n"
+    msg = "💳 Set Your BSC Wallet Address\n\n"
+    msg += "⚠️ Send your MetaCore (BEP-20) wallet address\n"
     msg += "⚠️ Must start with 0x and be 42 characters\n"
-    msg += "⚠️ Double\\-check \\- wrong address \\= lost tokens\\!\n\n"
-    msg += "Example: `0x742d35Cc6634C0532925a3b8D4C0C8b3C2e1e1e1`\n\n"
-    msg += "🔗 *BSC Testnet Network Details:*\n"
+    msg += "⚠️ Double-check - wrong address = lost tokens!\n\n"
+    msg += "Example: 0x742d35Cc6634C0532925a3b8D4C0C8b3C2e1e1e1\n\n"
+    msg += "🔗 BSC Testnet Network Details:\n"
     msg += "• Network Name: BSC Testnet\n"
-    msg += "• RPC URL: https://data\\-seed\\-prebsc\\-1\\-s1\\.binance\\.org:8545/\n"
+    msg += "• RPC URL: https://data-seed-prebsc-1-s1.binance.org:8545/\n"
     msg += "• Chain ID: 97\n"
     msg += "• Symbol: tBNB\n"
-    msg += "• Block Explorer: https://testnet\\.bscscan\\.com"
+    msg += "• Block Explorer: https://testnet.bscscan.com"
     
-    await update.message.reply_text(msg, parse_mode=ParseMode.MARKDOWN_V2)
+    await update.message.reply_text(msg)
 
 async def process_wallet_address(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
@@ -429,27 +552,23 @@ async def process_wallet_address(update: Update, context: ContextTypes.DEFAULT_T
             supabase.table('users').update({'metacore_address': address}).eq('id', user_id).execute()
             user_states[user_id] = UserState.MAIN
             
-            msg = f"✅ *Wallet Address Saved\\!*\n\n"
-            msg += f"📍 Address: `{escape_markdown_v2(address)}`\n\n"
-            msg += f"🎉 You can now withdraw your MetaCore tokens\\!\n"
-            msg += f"🔗 Make sure you have BSC Testnet configured in your wallet\\!"
+            msg = f"✅ Wallet Address Saved!\n\n"
+            msg += f"📍 Address: {address}\n\n"
+            msg += f"🎉 You can now withdraw your MetaCore tokens!\n"
+            msg += f"🔗 Make sure you have BSC Testnet configured in your wallet!"
             
-            await update.message.reply_text(
-                msg, 
-                reply_markup=MAIN_KEYBOARD, 
-                parse_mode=ParseMode.MARKDOWN_V2
-            )
+            await update.message.reply_text(msg, reply_markup=MAIN_KEYBOARD)
         else:
-            msg = "❌ *Invalid wallet address\\!*\n\n"
+            msg = "❌ Invalid wallet address!\n\n"
             msg += "Please send a valid BSC address:\n"
             msg += "• Must start with 0x\n"
             msg += "• Must be exactly 42 characters\n"
             msg += "• Only contains letters and numbers"
-            await update.message.reply_text(msg, parse_mode=ParseMode.MARKDOWN_V2)
+            await update.message.reply_text(msg)
             
     except Exception as e:
         logger.error(f"Error processing wallet: {e}")
-        await update.message.reply_text("❌ Error saving wallet address\\.", parse_mode=ParseMode.MARKDOWN_V2)
+        await update.message.reply_text("❌ Error saving wallet address.")
 
 async def handle_withdraw(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
@@ -457,15 +576,15 @@ async def handle_withdraw(update: Update, context: ContextTypes.DEFAULT_TYPE):
         user = get_user(user_id)
         
         if not user:
-            await update.message.reply_text("❌ User not found\\. Please /start first\\.", parse_mode=ParseMode.MARKDOWN_V2)
+            await update.message.reply_text("❌ User not found. Please /start first.")
             return
         
         if not user['joined_all_groups']:
-            await update.message.reply_text("❌ Please join all required groups first\\!", parse_mode=ParseMode.MARKDOWN_V2)
+            await update.message.reply_text("❌ Please join all required groups first!")
             return
         
         if not user['metacore_address']:
-            await update.message.reply_text("❌ Please set your BSC wallet address first\\!", parse_mode=ParseMode.MARKDOWN_V2)
+            await update.message.reply_text("❌ Please set your BSC wallet address first!")
             return
         
         settings = get_settings()
@@ -473,28 +592,28 @@ async def handle_withdraw(update: Update, context: ContextTypes.DEFAULT_TYPE):
         balance_tokens = float(user['balance'])
         
         if balance_tokens < min_amount:
-            msg = f"❌ *Insufficient Balance\\!*\n\n"
+            msg = f"❌ Insufficient Balance!\n\n"
             msg += f"💰 Your balance: {balance_tokens:,.0f} MetaCore\n"
             msg += f"📊 Minimum withdrawal: {min_amount:,.0f} MetaCore\n\n"
-            msg += f"💡 Refer more friends to earn tokens\\!"
-            await update.message.reply_text(msg, parse_mode=ParseMode.MARKDOWN_V2)
+            msg += f"💡 Refer more friends to earn tokens!"
+            await update.message.reply_text(msg)
             return
         
         user_states[user_id] = UserState.WITHDRAWING
         
         address = user['metacore_address']
-        msg = f"💸 *Withdrawal Request*\n\n"
+        msg = f"💸 Withdrawal Request\n\n"
         msg += f"💰 Available: {balance_tokens:,.0f} MetaCore\n"
         msg += f"📊 Minimum: {min_amount:,.0f} MetaCore\n\n"
-        msg += f"💳 To: `{escape_markdown_v2(address[:10])}...{escape_markdown_v2(address[-6:])}`\n\n"
+        msg += f"💳 To: {address[:10]}...{address[-6:]}\n\n"
         msg += f"🔗 Network: BSC Testnet\n\n"
         msg += f"Enter withdrawal amount or type 'all':"
         
-        await update.message.reply_text(msg, parse_mode=ParseMode.MARKDOWN_V2)
+        await update.message.reply_text(msg)
         
     except Exception as e:
         logger.error(f"Error in withdraw: {e}")
-        await update.message.reply_text("❌ Error processing withdrawal request\\.", parse_mode=ParseMode.MARKDOWN_V2)
+        await update.message.reply_text("❌ Error processing withdrawal request.")
 
 async def process_withdrawal_amount(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
@@ -503,7 +622,7 @@ async def process_withdrawal_amount(update: Update, context: ContextTypes.DEFAUL
         user = get_user(user_id)
         
         if not user:
-            await update.message.reply_text("❌ User not found\\.", parse_mode=ParseMode.MARKDOWN_V2)
+            await update.message.reply_text("❌ User not found.")
             return
         
         balance_tokens = float(user['balance'])
@@ -517,15 +636,15 @@ async def process_withdrawal_amount(update: Update, context: ContextTypes.DEFAUL
             try:
                 amount = float(text.replace(',', ''))
             except ValueError:
-                await update.message.reply_text("❌ Please enter a valid number or 'all'", parse_mode=ParseMode.MARKDOWN_V2)
+                await update.message.reply_text("❌ Please enter a valid number or 'all'")
                 return
         
         # Validate amount
         if amount < min_amount or amount > balance_tokens:
-            msg = f"❌ *Invalid Amount\\!*\n\n"
+            msg = f"❌ Invalid Amount!\n\n"
             msg += f"📊 Min: {min_amount:,.0f} MetaCore\n"
             msg += f"📊 Max: {balance_tokens:,.0f} MetaCore"
-            await update.message.reply_text(msg, parse_mode=ParseMode.MARKDOWN_V2)
+            await update.message.reply_text(msg)
             return
         
         # Create withdrawal request
@@ -538,7 +657,7 @@ async def process_withdrawal_amount(update: Update, context: ContextTypes.DEFAUL
         
         result = supabase.table('withdrawals').insert(withdrawal_data).execute()
         if not result.data:
-            await update.message.reply_text("❌ Error creating withdrawal request\\.", parse_mode=ParseMode.MARKDOWN_V2)
+            await update.message.reply_text("❌ Error creating withdrawal request.")
             return
             
         withdrawal_id = result.data[0]['id']
@@ -557,23 +676,19 @@ async def process_withdrawal_amount(update: Update, context: ContextTypes.DEFAUL
         user_states[user_id] = UserState.MAIN
         
         address = user['metacore_address']
-        msg = f"✅ *Withdrawal Request Submitted\\!*\n\n"
+        msg = f"✅ Withdrawal Request Submitted!\n\n"
         msg += f"💰 Amount: {amount:,.0f} MetaCore\n"
-        msg += f"📍 To: `{escape_markdown_v2(address)}`\n"
+        msg += f"📍 To: {address}\n"
         msg += f"🔗 Network: BSC Testnet\n"
-        msg += f"🆔 Request ID: \\#{withdrawal_id}\n\n"
-        msg += f"⏳ Admin will review within 24 hours\\.\n"
-        msg += f"💬 You'll be notified when processed\\!"
+        msg += f"🆔 Request ID: #{withdrawal_id}\n\n"
+        msg += f"⏳ Admin will review within 24 hours.\n"
+        msg += f"💬 You'll be notified when processed!"
         
-        await update.message.reply_text(
-            msg, 
-            reply_markup=MAIN_KEYBOARD, 
-            parse_mode=ParseMode.MARKDOWN_V2
-        )
+        await update.message.reply_text(msg, reply_markup=MAIN_KEYBOARD)
         
     except Exception as e:
         logger.error(f"Error processing withdrawal: {e}")
-        await update.message.reply_text("❌ Error processing withdrawal\\.", parse_mode=ParseMode.MARKDOWN_V2)
+        await update.message.reply_text("❌ Error processing withdrawal.")
 
 async def notify_admin_withdrawal(context, withdrawal_id, user, amount):
     try:
@@ -584,22 +699,21 @@ async def notify_admin_withdrawal(context, withdrawal_id, user, amount):
             ]
         ])
         
-        username = escape_markdown_v2(user['username'] or 'N/A')
-        address = escape_markdown_v2(user['metacore_address'])
+        username = user['username'] or 'N/A'
+        address = user['metacore_address']
         
-        msg = f"🔔 *NEW WITHDRAWAL REQUEST*\n\n"
-        msg += f"👤 User: @{username} \\({user['id']}\\)\n"
+        msg = f"🔔 NEW WITHDRAWAL REQUEST\n\n"
+        msg += f"👤 User: @{username} ({user['id']})\n"
         msg += f"💰 Amount: {amount:,.0f} MetaCore\n"
-        msg += f"📍 Address: `{address}`\n"
+        msg += f"📍 Address: {address}\n"
         msg += f"🔗 Network: BSC Testnet\n"
-        msg += f"🆔 Request ID: \\#{withdrawal_id}\n"
-        msg += f"⏰ Time: {escape_markdown_v2(time.strftime('%Y-%m-%d %H:%M:%S'))}"
+        msg += f"🆔 Request ID: #{withdrawal_id}\n"
+        msg += f"⏰ Time: {time.strftime('%Y-%m-%d %H:%M:%S')}"
         
         await context.bot.send_message(
             chat_id=ADMIN_ID,
             text=msg,
-            reply_markup=keyboard,
-            parse_mode=ParseMode.MARKDOWN_V2
+            reply_markup=keyboard
         )
     except Exception as e:
         logger.error(f"Error notifying admin: {e}")
@@ -611,46 +725,48 @@ async def handle_profile(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         if user:
             balance_tokens = float(user['balance'])
-            referrals = supabase.table('referrals').select('*').eq('inviter', user_id).execute()
+                        referrals = supabase.table('referrals').select('*').eq('inviter', user_id).execute()
             referral_count = len(referrals.data) if referrals.data else 0
             
-            username = escape_markdown_v2(user['username'] or 'N/A')
+            username = user['username'] or 'N/A'
             
-            msg = f"👤 *Your Profile*\n\n"
-            msg += f"🆔 ID: `{user['id']}`\n"
+            msg = f"👤 Your Profile\n\n"
+            msg += f"🆔 ID: {user['id']}\n"
             msg += f"👤 Username: @{username}\n"
+            msg += f"📱 Telegram: @{user.get('telegram_handle', 'Not set')}\n"
+            msg += f"🐦 Twitter: @{user.get('twitter_handle', 'Not set')}\n"
             msg += f"💰 Balance: {balance_tokens:,.0f} MetaCore\n"
             msg += f"👥 Referrals: {referral_count}\n"
             msg += f"💳 Wallet: {'Set' if user['metacore_address'] else 'Not Set'}\n"
             msg += f"✅ Groups: {'Joined' if user['joined_all_groups'] else 'Not Joined'}\n"
             msg += f"🔗 Network: BSC Testnet\n"
-            msg += f"📅 Joined: {escape_markdown_v2(user['created_at'][:10])}"
+            msg += f"📅 Joined: {user['created_at'][:10]}"
         else:
-            msg = "❌ User not found\\. Please /start first\\."
+            msg = "❌ User not found. Please /start first."
         
-        await update.message.reply_text(msg, parse_mode=ParseMode.MARKDOWN_V2)
+        await update.message.reply_text(msg)
         
     except Exception as e:
         logger.error(f"Error in profile: {e}")
-        await update.message.reply_text("❌ Error getting profile\\.", parse_mode=ParseMode.MARKDOWN_V2)
+        await update.message.reply_text("❌ Error getting profile.")
 
 async def handle_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    msg = "❓ *MetaCore Airdrop Help*\n\n"
-    msg += "🎯 *How to earn:*\n"
-    msg += "• Join groups: \\+500 MetaCore\n"
-    msg += "• Refer friends: \\+4000 MetaCore each\n\n"
-    msg += "💸 *Withdrawal:*\n"
+    msg = "❓ MetaCore Airdrop Help\n\n"
+    msg += "🎯 How to earn:\n"
+    msg += "• Join groups: +500 MetaCore\n"
+    msg += "• Refer friends: +4000 MetaCore each\n\n"
+    msg += "💸 Withdrawal:\n"
     msg += "• Minimum: 4000 MetaCore\n"
     msg += "• Set BSC wallet first\n"
     msg += "• Admin approval required\n"
     msg += "• Network: BSC Testnet\n\n"
-    msg += "🔗 *BSC Testnet Setup:*\n"
-    msg += "• RPC: https://data\\-seed\\-prebsc\\-1\\-s1\\.binance\\.org:8545/\n"
+    msg += "🔗 BSC Testnet Setup:\n"
+    msg += "• RPC: https://data-seed-prebsc-1-s1.binance.org:8545/\n"
     msg += "• Chain ID: 97\n"
     msg += "• Symbol: tBNB\n\n"
-    msg += "🔗 *Support:* @your\\_support\\_username"
+    msg += "🔗 Support: @your_support_username"
     
-    await update.message.reply_text(msg, parse_mode=ParseMode.MARKDOWN_V2)
+    await update.message.reply_text(msg)
 
 # Admin callback handlers
 async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -687,27 +803,23 @@ async def approve_withdrawal(query, context, withdrawal_id):
         
         if success:
             await query.edit_message_text(
-                f"✅ *Withdrawal {withdrawal_id} approved and processed\\!*",
-                parse_mode=ParseMode.MARKDOWN_V2
+                f"✅ Withdrawal {withdrawal_id} approved and processed!"
             )
             
             # Notify user
             await context.bot.send_message(
                 chat_id=withdrawal['user_id'],
-                text=f"✅ *Your withdrawal of {float(withdrawal['amount']):,.0f} MetaCore has been processed\\!*\n\n🔗 Check BSC Testnet for your tokens\\.",
-                parse_mode=ParseMode.MARKDOWN_V2
+                text=f"✅ Your withdrawal of {float(withdrawal['amount']):,.0f} MetaCore has been processed!\n\n🔗 Check BSC Testnet for your tokens."
             )
         else:
             await query.edit_message_text(
-                f"❌ *Failed to process withdrawal {withdrawal_id}*",
-                parse_mode=ParseMode.MARKDOWN_V2
+                f"❌ Failed to process withdrawal {withdrawal_id}"
             )
             
     except Exception as e:
         logger.error(f"Error approving withdrawal: {e}")
         await query.edit_message_text(
-            f"❌ *Error processing withdrawal {withdrawal_id}*",
-            parse_mode=ParseMode.MARKDOWN_V2
+            f"❌ Error processing withdrawal {withdrawal_id}"
         )
 
 async def reject_withdrawal(query, context, withdrawal_id):
@@ -732,22 +844,19 @@ async def reject_withdrawal(query, context, withdrawal_id):
         }).execute()
         
         await query.edit_message_text(
-            f"❌ *Withdrawal {withdrawal_id} rejected and refunded\\!*",
-            parse_mode=ParseMode.MARKDOWN_V2
+            f"❌ Withdrawal {withdrawal_id} rejected and refunded!"
         )
         
         # Notify user
         await context.bot.send_message(
             chat_id=withdrawal['user_id'],
-            text=f"❌ *Your withdrawal request was rejected\\.*\n\nTokens have been refunded to your balance\\.",
-            parse_mode=ParseMode.MARKDOWN_V2
+            text=f"❌ Your withdrawal request was rejected.\n\nTokens have been refunded to your balance."
         )
         
     except Exception as e:
         logger.error(f"Error rejecting withdrawal: {e}")
         await query.edit_message_text(
-            f"❌ *Error rejecting withdrawal {withdrawal_id}*",
-            parse_mode=ParseMode.MARKDOWN_V2
+            f"❌ Error rejecting withdrawal {withdrawal_id}"
         )
 
 async def process_payment(withdrawal):
@@ -847,7 +956,7 @@ async def admin_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
         # Calculate total balance
         total_balance = sum(float(user['balance']) for user in users.data)
         
-        msg = f"📊 *Admin Statistics*\n\n"
+        msg = f"📊 Admin Statistics\n\n"
         msg += f"👥 Total Users: {total_users:,}\n"
         msg += f"🔗 Total Referrals: {total_referrals:,}\n"
         msg += f"⏳ Pending Withdrawals: {pending_withdrawals}\n"
@@ -855,11 +964,11 @@ async def admin_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
         msg += f"💵 Total Value: ${total_balance * 0.0225:,.2f}\n"
         msg += f"🔗 Network: BSC Testnet"
         
-        await update.message.reply_text(msg, parse_mode=ParseMode.MARKDOWN_V2)
+        await update.message.reply_text(msg)
         
     except Exception as e:
         logger.error(f"Error in admin stats: {e}")
-        await update.message.reply_text("❌ Error getting statistics\\.", parse_mode=ParseMode.MARKDOWN_V2)
+        await update.message.reply_text("❌ Error getting statistics.")
 
 async def handle_broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Broadcast message to all users"""
@@ -878,24 +987,21 @@ async def handle_broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE):
         failed = 0
         
         status_msg = await update.message.reply_text(
-            f"📡 *Broadcasting to {len(users.data)} users\\.\\.\\.*",
-            parse_mode=ParseMode.MARKDOWN_V2
+            f"📡 Broadcasting to {len(users.data)} users..."
         )
         
         for user in users.data:
             try:
                 await context.bot.send_message(
                     chat_id=user['id'], 
-                    text=f"📢 *Admin Broadcast*\n\n{escape_markdown_v2(message)}",
-                    parse_mode=ParseMode.MARKDOWN_V2
+                    text=f"📢 Admin Broadcast\n\n{message}"
                 )
                 sent += 1
                 
                 # Update status every 50 users
                 if sent % 50 == 0:
                     await status_msg.edit_text(
-                        f"📡 *Sent to {sent}/{len(users.data)} users\\.\\.\\.*",
-                        parse_mode=ParseMode.MARKDOWN_V2
+                        f"📡 Sent to {sent}/{len(users.data)} users..."
                     )
                     
             except Exception as e:
@@ -903,13 +1009,12 @@ async def handle_broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 logger.error(f"Failed to send to {user['id']}: {e}")
         
         await status_msg.edit_text(
-            f"✅ *Broadcast complete\\!*\n📤 Sent: {sent}\n❌ Failed: {failed}",
-            parse_mode=ParseMode.MARKDOWN_V2
+            f"✅ Broadcast complete!\n📤 Sent: {sent}\n❌ Failed: {failed}"
         )
         
     except Exception as e:
         logger.error(f"Error in broadcast: {e}")
-        await update.message.reply_text("❌ Error broadcasting message\\.", parse_mode=ParseMode.MARKDOWN_V2)
+        await update.message.reply_text("❌ Error broadcasting message.")
 
 async def handle_user_info(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Get user information"""
@@ -929,31 +1034,35 @@ async def handle_user_info(update: Update, context: ContextTypes.DEFAULT_TYPE):
             referrals = supabase.table('referrals').select('*').eq('inviter', user_id).execute()
             withdrawals = supabase.table('withdrawals').select('*').eq('user_id', user_id).execute()
             
-            username = escape_markdown_v2(user['username'] or 'N/A')
-            full_name = escape_markdown_v2(user['full_name'] or 'N/A')
-            wallet = escape_markdown_v2(user['metacore_address'] or 'Not set')
+            username = user['username'] or 'N/A'
+            full_name = user['full_name'] or 'N/A'
+            wallet = user['metacore_address'] or 'Not set'
+            telegram_handle = user.get('telegram_handle', 'Not set')
+            twitter_handle = user.get('twitter_handle', 'Not set')
             
-            msg = f"👤 *User Info: {user_id}*\n\n"
+            msg = f"👤 User Info: {user_id}\n\n"
             msg += f"Username: @{username}\n"
             msg += f"Full Name: {full_name}\n"
+            msg += f"Telegram: @{telegram_handle}\n"
+            msg += f"Twitter: @{twitter_handle}\n"
             msg += f"Balance: {balance:,.0f} MetaCore\n"
             msg += f"Referrals: {len(referrals.data)}\n"
             msg += f"Withdrawals: {len(withdrawals.data)}\n"
             msg += f"Groups Joined: {'Yes' if user['joined_all_groups'] else 'No'}\n"
-            msg += f"Wallet: `{wallet}`\n"
+            msg += f"Group Bonus: {'Yes' if user.get('has_received_group_bonus', False) else 'No'}\n"
+            msg += f"Wallet: {wallet}\n"
             msg += f"Invited By: {user['invited_by'] or 'Direct'}\n"
-            msg += f"Joined: {escape_markdown_v2(user['created_at'][:10])}\n"
-            msg += f"Last Active: {escape_markdown_v2(user['last_active'][:10]) if user['last_active'] else 'N/A'}"
+            msg += f"Joined: {user['created_at'][:10]}"
             
-            await update.message.reply_text(msg, parse_mode=ParseMode.MARKDOWN_V2)
+            await update.message.reply_text(msg)
         else:
-            await update.message.reply_text("❌ User not found", parse_mode=ParseMode.MARKDOWN_V2)
+            await update.message.reply_text("❌ User not found")
             
     except ValueError:
-        await update.message.reply_text("❌ Invalid user ID", parse_mode=ParseMode.MARKDOWN_V2)
+        await update.message.reply_text("❌ Invalid user ID")
     except Exception as e:
         logger.error(f"Error in user info: {e}")
-        await update.message.reply_text("❌ Error getting user info\\.", parse_mode=ParseMode.MARKDOWN_V2)
+        await update.message.reply_text("❌ Error getting user info.")
 
 async def handle_add_balance(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Add balance to user"""
@@ -992,16 +1101,15 @@ async def handle_add_balance(update: Update, context: ContextTypes.DEFAULT_TYPE)
             }
         }).execute()
         
-        username = escape_markdown_v2(user['username'] or 'N/A')
-        msg = f"✅ *Added {amount:,.0f} MetaCore to @{username} \\({user_id}\\)*"
-        await update.message.reply_text(msg, parse_mode=ParseMode.MARKDOWN_V2)
+        username = user['username'] or 'N/A'
+        msg = f"✅ Added {amount:,.0f} MetaCore to @{username} ({user_id})"
+        await update.message.reply_text(msg)
         
         # Notify user
         try:
             await context.bot.send_message(
                 chat_id=user_id,
-                text=f"🎁 *You received {amount:,.0f} MetaCore from admin\\!*",
-                parse_mode=ParseMode.MARKDOWN_V2
+                text=f"🎁 You received {amount:,.0f} MetaCore from admin!"
             )
         except:
             pass  # User might have blocked bot
@@ -1010,7 +1118,7 @@ async def handle_add_balance(update: Update, context: ContextTypes.DEFAULT_TYPE)
         await update.message.reply_text("❌ Invalid user ID or amount")
     except Exception as e:
         logger.error(f"Error adding balance: {e}")
-        await update.message.reply_text("❌ Error adding balance\\.", parse_mode=ParseMode.MARKDOWN_V2)
+        await update.message.reply_text("❌ Error adding balance.")
 
 async def handle_withdrawals(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Show pending withdrawals"""
@@ -1021,31 +1129,31 @@ async def handle_withdrawals(update: Update, context: ContextTypes.DEFAULT_TYPE)
         withdrawals = supabase.table('withdrawals').select('*').eq('status', 'pending').order('created_at').execute()
         
         if not withdrawals.data:
-            await update.message.reply_text("✅ *No pending withdrawals*", parse_mode=ParseMode.MARKDOWN_V2)
+            await update.message.reply_text("✅ No pending withdrawals")
             return
         
-        msg = f"⏳ *Pending Withdrawals \\({len(withdrawals.data)}\\)*\n\n"
+        msg = f"⏳ Pending Withdrawals ({len(withdrawals.data)})\n\n"
         
         for w in withdrawals.data[:10]:  # Show first 10
             user = get_user(w['user_id'])
-            username = escape_markdown_v2(user['username'] if user else 'Unknown')
+            username = user['username'] if user else 'Unknown'
             amount = float(w['amount'])
             address = w['to_address']
             
-            msg += f"🆔 \\#{w['id']}\n"
-            msg += f"👤 @{username} \\({w['user_id']}\\)\n"
+            msg += f"🆔 #{w['id']}\n"
+            msg += f"👤 @{username} ({w['user_id']})\n"
             msg += f"💰 {amount:,.0f} MetaCore\n"
-            msg += f"📍 `{escape_markdown_v2(address[:10])}...{escape_markdown_v2(address[-6:])}`\n"
-            msg += f"⏰ {escape_markdown_v2(w['created_at'][:16])}\n\n"
+            msg += f"📍 {address[:10]}...{address[-6:]}\n"
+            msg += f"⏰ {w['created_at'][:16]}\n\n"
         
         if len(withdrawals.data) > 10:
-            msg += f"\\.\\.\\. and {len(withdrawals.data) - 10} more"
+            msg += f"... and {len(withdrawals.data) - 10} more"
         
-        await update.message.reply_text(msg, parse_mode=ParseMode.MARKDOWN_V2)
+        await update.message.reply_text(msg)
         
     except Exception as e:
         logger.error(f"Error getting withdrawals: {e}")
-        await update.message.reply_text("❌ Error getting withdrawals\\.", parse_mode=ParseMode.MARKDOWN_V2)
+        await update.message.reply_text("❌ Error getting withdrawals.")
 
 async def handle_settings(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Show/update bot settings"""
@@ -1055,7 +1163,7 @@ async def handle_settings(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         settings = get_settings()
         
-        msg = f"⚙️ *Bot Settings*\n\n"
+        msg = f"⚙️ Bot Settings\n\n"
         msg += f"💰 Signup Bonus: {settings['signup_bonus']} MetaCore\n"
         msg += f"🎁 Referral Bonus: {settings['referral_bonus']} MetaCore\n"
         msg += f"👥 Group Join Bonus: {settings['group_join_bonus']} MetaCore\n"
@@ -1064,11 +1172,11 @@ async def handle_settings(update: Update, context: ContextTypes.DEFAULT_TYPE):
         msg += f"🔗 Network: BSC Testnet\n\n"
         msg += f"Use /setsetting <key> <value> to update"
         
-        await update.message.reply_text(msg, parse_mode=ParseMode.MARKDOWN_V2)
+        await update.message.reply_text(msg)
         
     except Exception as e:
         logger.error(f"Error getting settings: {e}")
-        await update.message.reply_text("❌ Error getting settings\\.", parse_mode=ParseMode.MARKDOWN_V2)
+        await update.message.reply_text("❌ Error getting settings.")
 
 async def handle_set_setting(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Update a setting"""
@@ -1086,7 +1194,7 @@ async def handle_set_setting(update: Update, context: ContextTypes.DEFAULT_TYPE)
         valid_keys = ['signup_bonus', 'referral_bonus', 'group_join_bonus', 'min_withdraw_amount', 'token_price_usd']
         
         if key not in valid_keys:
-            await update.message.reply_text(f"❌ Invalid key\\. Valid keys: {escape_markdown_v2(', '.join(valid_keys))}", parse_mode=ParseMode.MARKDOWN_V2)
+            await update.message.reply_text(f"❌ Invalid key. Valid keys: {', '.join(valid_keys)}")
             return
         
         # Update setting
@@ -1102,14 +1210,11 @@ async def handle_set_setting(update: Update, context: ContextTypes.DEFAULT_TYPE)
             }
         }).execute()
         
-        await update.message.reply_text(
-            f"✅ *Updated {escape_markdown_v2(key)} to {escape_markdown_v2(value)}*",
-            parse_mode=ParseMode.MARKDOWN_V2
-        )
+        await update.message.reply_text(f"✅ Updated {key} to {value}")
         
     except Exception as e:
         logger.error(f"Error updating setting: {e}")
-        await update.message.reply_text("❌ Error updating setting\\.", parse_mode=ParseMode.MARKDOWN_V2)
+        await update.message.reply_text("❌ Error updating setting.")
 
 async def handle_network_info(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Show BSC Testnet network information"""
@@ -1121,16 +1226,16 @@ async def handle_network_info(update: Update, context: ContextTypes.DEFAULT_TYPE
         is_connected = w3.isConnected()
         latest_block = w3.eth.block_number if is_connected else "N/A"
         
-        msg = f"🔗 *BSC Testnet Network Info*\n\n"
+        msg = f"🔗 BSC Testnet Network Info\n\n"
         msg += f"📡 Connection: {'✅ Connected' if is_connected else '❌ Disconnected'}\n"
-        msg += f"🔗 RPC URL: {escape_markdown_v2(BSC_NODE_URL)}\n"
+        msg += f"🔗 RPC URL: {BSC_NODE_URL}\n"
         msg += f"🆔 Chain ID: 97\n"
         msg += f"💰 Symbol: tBNB\n"
         msg += f"📊 Latest Block: {latest_block}\n"
-        msg += f"🔍 Explorer: https://testnet\\.bscscan\\.com\n\n"
+        msg += f"🔍 Explorer: https://testnet.bscscan.com\n\n"
         
         if CONTRACT_ADDRESS:
-            msg += f"📄 Contract: `{escape_markdown_v2(CONTRACT_ADDRESS)}`\n"
+            msg += f"📄 Contract: {CONTRACT_ADDRESS}\n"
         else:
             msg += f"📄 Contract: Not configured\n"
             
@@ -1141,15 +1246,15 @@ async def handle_network_info(update: Update, context: ContextTypes.DEFAULT_TYPE
                 balance_bnb = w3.fromWei(balance, 'ether')
                 msg += f"💳 Admin Balance: {balance_bnb:.4f} tBNB"
             else:
-                msg += f"💳 Admin Address: `{escape_markdown_v2(admin_account.address)}`"
+                msg += f"💳 Admin Address: {admin_account.address}"
         else:
             msg += f"💳 Admin Key: Not configured"
         
-        await update.message.reply_text(msg, parse_mode=ParseMode.MARKDOWN_V2)
+        await update.message.reply_text(msg)
         
     except Exception as e:
         logger.error(f"Error getting network info: {e}")
-        await update.message.reply_text("❌ Error getting network info\\.", parse_mode=ParseMode.MARKDOWN_V2)
+        await update.message.reply_text("❌ Error getting network info.")
 
 # Error handler
 async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -1190,3 +1295,4 @@ def main():
 
 if __name__ == '__main__':
     main()
+
