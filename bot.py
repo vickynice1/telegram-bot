@@ -10,6 +10,21 @@ import re
 from web3 import Web3
 import json
 
+try:
+    import gotrue._sync.gotrue_base_api as gbase
+
+    _old_init = gbase.SyncClient.__init__
+
+    def _new_init(self, *args, proxy=None, **kwargs):
+        # Drop the proxy arg, forward everything else
+        return _old_init(self, *args, **kwargs)
+
+    gbase.SyncClient.__init__ = _new_init
+    print("✅ Patched gotrue to ignore proxy argument")
+
+except Exception as e:
+    print("⚠️ Failed to patch gotrue:", e)
+
 # Configuration
 SUPABASE_URL = os.getenv("SUPABASE_URL")
 SUPABASE_KEY = os.getenv("SUPABASE_KEY")
