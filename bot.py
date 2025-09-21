@@ -1159,12 +1159,7 @@ async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> N
 def main():
     """Start the bot"""
     try:
-        # Create application with explicit configuration for Python 3.13 compatibility
-        builder = Application.builder()
-        builder.token(BOT_TOKEN)
-        
-        # Build application without automatic updater creation
-        application = builder.build()
+        application = Application.builder().token(BOT_TOKEN).build()
         
         # Add handlers
         application.add_handler(CommandHandler("start", start))
@@ -1187,27 +1182,11 @@ def main():
         logger.info(f"🔗 Connected to: {BSC_NODE_URL}")
         logger.info(f"📄 Contract: {CONTRACT_ADDRESS or 'Not configured'}")
         
-        # Start bot with webhook or polling based on environment
-        import asyncio
-        
-        async def run_bot():
-            async with application:
-                await application.initialize()
-                await application.start()
-                await application.updater.start_polling(
-                    drop_pending_updates=True,
-                    allowed_updates=Update.ALL_TYPES
-                )
-                # Keep the bot running
-                await application.updater.idle()
-        
-        # Run the bot
-        asyncio.run(run_bot())
+        # Start bot
+        application.run_polling(drop_pending_updates=True)
         
     except Exception as e:
         logger.error(f"Failed to start bot: {e}")
-        raise
-
 
 if __name__ == '__main__':
     main()
