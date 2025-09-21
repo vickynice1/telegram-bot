@@ -648,7 +648,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     data = query.data
     
-        if data.startswith('approve_'):
+    if data.startswith('approve_'):
         withdrawal_id = int(data.split('_')[1])
         await approve_withdrawal(query, context, withdrawal_id)
     elif data.startswith('reject_'):
@@ -1175,4 +1175,3 @@ def main():
 
 if __name__ == '__main__':
     main()
-
