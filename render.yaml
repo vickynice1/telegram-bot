@@ -3,7 +3,8 @@ services:
   - type: web
     name: telegram-bot
     env: python
-    buildCommand: pip install -r requirements.txt
+    runtime: python-3.11.9
+    buildCommand: pip install --upgrade pip && pip install -r requirements.txt
     startCommand: python bot.py
     envVars:
       - key: BOT_TOKEN
@@ -16,14 +17,17 @@ services:
         sync: false
       - key: CONTRACT_ADDRESS
         sync: false
+      - key: ADMIN_PRIVATE_KEY
+        sync: false
       - key: BSC_NODE_URL
-        value: https://bsc-dataseed.binance.org/
+        value: https://data-seed-prebsc-1-s1.binance.org:8545/
     
   # Payment Processor (Background Service)
   - type: worker
     name: payment-processor
     env: python
-    buildCommand: pip install -r requirements.txt
+    runtime: python-3.11.9
+    buildCommand: pip install --upgrade pip && pip install -r requirements.txt
     startCommand: python payment_processor.py
     envVars:
       - key: SUPABASE_URL
@@ -35,4 +39,4 @@ services:
       - key: ADMIN_PRIVATE_KEY
         sync: false
       - key: BSC_NODE_URL
-        value: https://bsc-dataseed.binance.org/
+        value: https://data-seed-prebsc-1-s1.binance.org:8545/
