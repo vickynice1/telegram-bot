@@ -1268,8 +1268,8 @@ async def handle_network_info(update: Update, context: ContextTypes.DEFAULT_TYPE
         if ADMIN_PRIVATE_KEY:
             admin_account = w3.eth.account.from_key(ADMIN_PRIVATE_KEY)
             if is_connected:
-    balance = w3.eth.get_balance(admin_account.address)
-    balance_bnb = w3.from_wei(balance, 'ether')
+                balance = w3.eth.get_balance(admin_account.address)
+                balance_bnb = w3.from_wei(balance, 'ether')
     
                 msg += f"💳 Admin Balance: {balance_bnb:.4f} tBNB"
             else:
