@@ -792,24 +792,19 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def approve_withdrawal(query, context, withdrawal_id):
     try:
-        # First update to processing
+        # Set to processing
         supabase.table('withdrawals').update({
-            'status': 'processing',  # ✅ Set to processing first
+            'status': 'processing',
             'processed_at': 'now()'
         }).eq('id', withdrawal_id).execute()
         
         # Get withdrawal details
         withdrawal = supabase.table('withdrawals').select('*').eq('id', withdrawal_id).execute().data[0]
         
-        # Process payment
+        # Process payment immediately
         success = await process_payment(withdrawal)
         
         if success:
-            # Update to paid after successful processing
-            supabase.table('withdrawals').update({
-                'status': 'paid'
-            }).eq('id', withdrawal_id).execute()
-            
             await query.edit_message_text(
                 f"✅ Withdrawal {withdrawal_id} processed successfully!"
             )
@@ -820,26 +815,37 @@ async def approve_withdrawal(query, context, withdrawal_id):
                 text=f"✅ Your withdrawal of {float(withdrawal['amount']):,.0f} MetaCore has been processed!\n\n🔗 Check BSC Testnet for your tokens."
             )
         else:
-            # Update to failed if processing failed
-            supabase.table('withdrawals').update({
-                'status': 'failed',
-                'admin_note': 'Payment processing failed'
-            }).eq('id', withdrawal_id).execute()
+            # Refund user balance on failure
+            supabase.rpc('add_balance', {
+                'user_id_param': withdrawal['user_id'],
+                'amount_param': withdrawal['amount'],
+                'type_param': 'refund',
+                'description_param': f'Refund for failed withdrawal #{withdrawal_id}'
+            }).execute()
             
             await query.edit_message_text(
-                f"❌ Failed to process withdrawal {withdrawal_id}"
+                f"❌ Failed to process withdrawal {withdrawal_id}. Balance refunded."
             )
             
     except Exception as e:
         logger.error(f"Error approving withdrawal: {e}")
-        # Update to failed on exception
+        
+        # Refund on exception
+        withdrawal = supabase.table('withdrawals').select('*').eq('id', withdrawal_id).execute().data[0]
+        supabase.rpc('add_balance', {
+            'user_id_param': withdrawal['user_id'],
+            'amount_param': withdrawal['amount'],
+            'type_param': 'refund',
+            'description_param': f'Refund for failed withdrawal #{withdrawal_id}'
+        }).execute()
+        
         supabase.table('withdrawals').update({
             'status': 'failed',
             'admin_note': f'Error: {str(e)[:100]}'
         }).eq('id', withdrawal_id).execute()
         
         await query.edit_message_text(
-            f"❌ Error processing withdrawal {withdrawal_id}"
+            f"❌ Error processing withdrawal {withdrawal_id}. Balance refunded."
         )
 
 async def reject_withdrawal(query, context, withdrawal_id):
