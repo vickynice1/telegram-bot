@@ -1,0 +1,56 @@
+name: Payment Processor Service
+
+on:
+  schedule:
+    # Run every 2 minutes
+    - cron: '*/2 * * * *'
+  workflow_dispatch:
+    inputs:
+      force_run:
+        description: 'Force run payment processor'
+        required: false
+        default: 'false'
+
+jobs:
+  process-payments:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+    
+    - name: Set up Python 3.11
+      uses: actions/setup-python@v4
+      with:
+        python-version: '3.11.9'
+    
+    - name: Cache pip dependencies
+      uses: actions/cache@v3
+      with:
+        path: ~/.cache/pip
+        key: ${{ runner.os }}-pip-${{ hashFiles('**/requirements.txt') }}
+        restore-keys: |
+          ${{ runner.os }}-pip-
+    
+    - name: Install system dependencies
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y gcc g++
+    
+    - name: Install Python dependencies
+      run: |
+        python -m pip install --upgrade pip setuptools wheel
+        pip install --only-binary=:all: --no-build-isolation -r requirements.txt
+    
+    - name: Run Payment Processor
+      env:
+        SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+        SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
+        CONTRACT_ADDRESS: ${{ secrets.CONTRACT_ADDRESS }}
+        ADMIN_PRIVATE_KEY: ${{ secrets.ADMIN_PRIVATE_KEY }}
+        ADMIN_ADDRESS: ${{ secrets.ADMIN_ADDRESS }}
+        BSC_NODE_URL: ${{ secrets.BSC_NODE_URL }}
+      run: |
+        echo "💳 Starting Payment Processor..."
+        timeout 8m python process.py || echo "Payment processor completed or timed out"
