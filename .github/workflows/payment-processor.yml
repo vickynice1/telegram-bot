@@ -53,4 +53,4 @@ jobs:
         BSC_NODE_URL: ${{ secrets.BSC_NODE_URL }}
       run: |
         echo "💳 Starting Payment Processor..."
-        python process_single.py
+        python process.py
