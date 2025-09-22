@@ -119,6 +119,13 @@ def process_single_batch():
         
         logger.info(f"📋 Processing {len(withdrawals.data)} withdrawals")
         
+        # Check admin balance first
+        admin_balance = check_contract_balance()
+        total_needed = sum(float(w['amount']) for w in withdrawals.data)
+        
+        if admin_balance < total_needed:
+            logger.warning(f"⚠️ Insufficient balance. Need: {total_needed}, Have: {admin_balance}")
+        
         successful = 0
         failed = 0
         
@@ -131,17 +138,36 @@ def process_single_batch():
                 
                 logger.info(f"💳 Processing withdrawal {withdrawal_id}: {amount} tokens to {to_address}")
                 
+                # Validate withdrawal
+                is_valid, validation_msg = validate_withdrawal_request(withdrawal)
+                if not is_valid:
+                    logger.error(f"❌ Validation failed for {withdrawal_id}: {validation_msg}")
+                    
+                    # Mark as failed and refund
+                    supabase.table('withdrawals').update({
+                        'status': 'failed',
+                        'admin_note': f'Validation failed: {validation_msg}'
+                    }).eq('id', withdrawal_id).execute()
+                    
+                    # Refund user
+                    supabase.rpc('add_balance', {
+                        'user_id_param': user_id,
+                        'amount_param': str(amount),
+                        'type_param': 'refund',
+                        'description_param': f'Refund for failed withdrawal #{withdrawal_id}'
+                    }).execute()
+                    
+                    failed += 1
+                    continue
+                
                 # Mark as processing
                 supabase.table('withdrawals').update({
                     'status': 'processing',
                     'processed_at': 'now()'
                 }).eq('id', withdrawal_id).execute()
                 
-                # Simulate payment for now (replace with actual send_tokens function)
-                # tx_hash = send_tokens(to_address, amount)
-                
-                # For testing - simulate successful transaction
-                tx_hash = f"0x{''.join(['a' if i % 2 == 0 else 'b' for i in range(64)])}"
+                # Send actual transaction
+                tx_hash = send_tokens(to_address, amount)
                 
                 if tx_hash:
                     # Mark as paid
@@ -152,7 +178,16 @@ def process_single_batch():
                         'network': NETWORK_NAME
                     }).eq('id', withdrawal_id).execute()
                     
-                    logger.info(f"✅ Withdrawal {withdrawal_id} processed successfully")
+                    # Log transaction
+                    supabase.table('transactions').insert({
+                        'user_id': user_id,
+                        'type': 'withdrawal_paid',
+                        'amount': str(-amount),
+                        'description': f'Withdrawal paid on {NETWORK_NAME} - TX: {tx_hash}',
+                        'reference_id': withdrawal_id
+                    }).execute()
+                    
+                    logger.info(f"✅ Withdrawal {withdrawal_id} processed successfully: {tx_hash}")
                     successful += 1
                 else:
                     # Mark as failed and refund
@@ -172,17 +207,75 @@ def process_single_batch():
                     logger.error(f"❌ Failed to process withdrawal {withdrawal_id}")
                     failed += 1
                 
-                # Small delay between transactions
-                time.sleep(2)
+                # Delay between transactions
+                time.sleep(5)
                 
             except Exception as e:
                 logger.error(f"❌ Error processing withdrawal {withdrawal['id']}: {e}")
+                
+                # Mark as failed and refund
+                try:
+                    supabase.table('withdrawals').update({
+                        'status': 'failed',
+                        'admin_note': f'Processing error: {str(e)[:200]}'
+                    }).eq('id', withdrawal['id']).execute()
+                    
+                    supabase.rpc('add_balance', {
+                        'user_id_param': withdrawal['user_id'],
+                        'amount_param': str(withdrawal['amount']),
+                        'type_param': 'refund',
+                        'description_param': f'Refund for failed withdrawal #{withdrawal["id"]}'
+                    }).execute()
+                except Exception as refund_error:
+                    logger.error(f"Error refunding: {refund_error}")
+                
                 failed += 1
         
         logger.info(f"📊 Batch complete: {successful} successful, {failed} failed")
         
     except Exception as e:
         logger.error(f"❌ Error in process_single_batch: {e}")
+        def check_contract_balance():
+    """Check admin wallet token balance"""
+    try:
+        contract = get_contract()
+        admin_account = get_admin_account()
+        
+        if not contract or not admin_account:
+            return 0
+        
+        balance = contract.functions.balanceOf(admin_account.address).call()
+        decimals = contract.functions.decimals().call()
+        token_balance = balance / (10 ** decimals)
+        
+        logger.info(f"💰 Admin wallet balance: {token_balance:,.2f} tokens")
+        return token_balance
+        
+    except Exception as e:
+        logger.error(f"Error checking balance: {e}")
+        return 0
+
+def validate_withdrawal_request(withdrawal):
+    """Validate withdrawal before processing"""
+    try:
+        # Check if address is valid
+        Web3.to_checksum_address(withdrawal['to_address'])
+        
+        # Check amount is positive
+        amount = float(withdrawal['amount'])
+        if amount <= 0:
+            return False, "Invalid amount"
+        
+        # Check admin balance
+        admin_balance = check_contract_balance()
+        if admin_balance < amount:
+            return False, f"Insufficient admin balance: {admin_balance}"
+        
+        return True, "Valid"
+        
+    except Exception as e:
+        return False, f"Validation error: {e}"
+
 
 def cleanup_stuck_withdrawals():
     """Clean up withdrawals stuck in processing"""
