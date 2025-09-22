@@ -53,4 +53,4 @@ jobs:
         BSC_NODE_URL: ${{ secrets.BSC_NODE_URL }}
       run: |
         echo "💳 Starting Payment Processor..."
-        timeout 8m python process.py || echo "Payment processor completed or timed out"
+        python process_single.py
