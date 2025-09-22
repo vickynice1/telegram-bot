@@ -923,14 +923,14 @@ async def process_payment(withdrawal):
         # Convert amount to wei (assuming 18 decimals)
         amount_wei = int(float(withdrawal['amount']) * 10**18)
         
-        # Build transaction
+        # Build transaction - FIXED: Call build_transaction() on the function, not transfer
         transaction = contract.functions.transfer(
             w3.to_checksum_address(withdrawal['to_address']),
             amount_wei
-        ).buildTransaction({
+        ).build_transaction({  # Changed from buildTransaction to build_transaction
             'from': admin_account.address,
             'gas': 100000,
-            'gasPrice': w3.to_wei(10, 'gwei'),  # Also fixed this
+            'gasPrice': w3.to_wei(10, 'gwei'),
             'nonce': w3.eth.get_transaction_count(admin_account.address),
         })
         
@@ -1268,8 +1268,8 @@ async def handle_network_info(update: Update, context: ContextTypes.DEFAULT_TYPE
         if ADMIN_PRIVATE_KEY:
             admin_account = w3.eth.account.from_key(ADMIN_PRIVATE_KEY)
             if is_connected:
-                balance = w3.eth.get_balance(admin_account.address)
-                balance_bnb = w3.from_wei(balance, 'ether')
+    balance = w3.eth.get_balance(admin_account.address)
+    balance_bnb = w3.from_wei(balance, 'ether')
     
                 msg += f"💳 Admin Balance: {balance_bnb:.4f} tBNB"
             else:
