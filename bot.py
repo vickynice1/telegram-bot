@@ -913,7 +913,7 @@ async def process_payment(withdrawal):
         
         # Initialize contract
         contract = w3.eth.contract(
-            address=Web3.toChecksumAddress(CONTRACT_ADDRESS),
+            address=w3.to_checksum_address(CONTRACT_ADDRESS),
             abi=contract_abi
         )
         
@@ -925,12 +925,12 @@ async def process_payment(withdrawal):
         
         # Build transaction
         transaction = contract.functions.transfer(
-            Web3.toChecksumAddress(withdrawal['to_address']),
+            w3.to_checksum_address(withdrawal['to_address']),
             amount_wei
         ).buildTransaction({
             'from': admin_account.address,
             'gas': 100000,
-            'gasPrice': w3.toWei('10', 'gwei'),
+            'gasPrice': w3.to_wei(10, 'gwei'),  # Also fixed this
             'nonce': w3.eth.get_transaction_count(admin_account.address),
         })
         
@@ -1268,8 +1268,9 @@ async def handle_network_info(update: Update, context: ContextTypes.DEFAULT_TYPE
         if ADMIN_PRIVATE_KEY:
             admin_account = w3.eth.account.from_key(ADMIN_PRIVATE_KEY)
             if is_connected:
-                balance = w3.eth.get_balance(admin_account.address)
-                balance_bnb = w3.fromWei(balance, 'ether')
+    balance = w3.eth.get_balance(admin_account.address)
+    balance_bnb = w3.from_wei(balance, 'ether')
+    
                 msg += f"💳 Admin Balance: {balance_bnb:.4f} tBNB"
             else:
                 msg += f"💳 Admin Address: {admin_account.address}"
