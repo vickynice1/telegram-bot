@@ -52,7 +52,7 @@ except Exception as e:
     logger.error(f"❌ Initialization failed: {e}")
     exit(1)
 
-# Your existing ERC20_ABI and functions here...
+# ERC20 ABI
 ERC20_ABI = json.loads('''[
     {
         "constant": false,
@@ -87,8 +87,8 @@ ERC20_ABI = json.loads('''[
     }
 ]''')
 
-# Copy all your existing functions here (get_contract, get_admin_account, etc.)
 def get_contract():
+    """Get contract instance"""
     try:
         return w3.eth.contract(
             address=Web3.to_checksum_address(CONTRACT_ADDRESS), 
@@ -99,11 +99,113 @@ def get_contract():
         return None
 
 def get_admin_account():
+    """Get admin account from private key"""
     try:
         return w3.eth.account.from_key(ADMIN_PRIVATE_KEY)
     except Exception as e:
         logger.error(f"Error getting admin account: {e}")
         return None
+
+def check_contract_balance():
+    """Check admin wallet token balance"""
+    try:
+        contract = get_contract()
+        admin_account = get_admin_account()
+        
+        if not contract or not admin_account:
+            return 0
+        
+        balance = contract.functions.balanceOf(admin_account.address).call()
+        decimals = contract.functions.decimals().call()
+        token_balance = balance / (10 ** decimals)
+        
+        logger.info(f"💰 Admin wallet balance: {token_balance:,.2f} tokens")
+        return token_balance
+        
+    except Exception as e:
+        logger.error(f"Error checking balance: {e}")
+        return 0
+
+def send_tokens(to_address, amount_tokens):
+    """Send tokens via Web3"""
+    try:
+        logger.info(f"💰 Sending {amount_tokens} tokens to {to_address}")
+        
+        contract = get_contract()
+        admin_account = get_admin_account()
+        
+        if not contract or not admin_account:
+            logger.error("Failed to get contract or admin account")
+            return None
+        
+        # Convert to checksum address
+        to_address = Web3.to_checksum_address(to_address)
+        
+        # Get token decimals
+        decimals = contract.functions.decimals().call()
+        amount_wei = int(Decimal(str(amount_tokens)) * (10 ** decimals))
+        
+        # Check balance
+        admin_balance = contract.functions.balanceOf(admin_account.address).call()
+        if admin_balance < amount_wei:
+            logger.error(f"Insufficient balance. Need: {amount_wei}, Have: {admin_balance}")
+            return None
+        
+        # Get transaction parameters
+        nonce = w3.eth.get_transaction_count(admin_account.address, 'pending')
+        gas_price = w3.eth.gas_price
+        
+        # Build transaction
+        transaction = contract.functions.transfer(
+            to_address, amount_wei
+        ).build_transaction({
+            'chainId': CHAIN_ID,
+            'gas': 200000,
+            'gasPrice': int(gas_price * 1.2),
+            'nonce': nonce,
+        })
+        
+        # Sign and send
+        signed_txn = w3.eth.account.sign_transaction(transaction, ADMIN_PRIVATE_KEY)
+        tx_hash = w3.eth.send_raw_transaction(signed_txn.rawTransaction)
+        tx_hash_hex = tx_hash.hex()
+        
+        logger.info(f"📤 Transaction sent: {tx_hash_hex}")
+        
+        # Wait for confirmation
+        receipt = w3.eth.wait_for_transaction_receipt(tx_hash, timeout=300)
+        
+        if receipt and receipt.status == 1:
+            logger.info(f"✅ Transaction confirmed: {tx_hash_hex}")
+            return tx_hash_hex
+        else:
+            logger.error(f"❌ Transaction failed: {tx_hash_hex}")
+            return None
+            
+    except Exception as e:
+        logger.error(f"Error sending tokens: {e}")
+        return None
+
+def validate_withdrawal_request(withdrawal):
+    """Validate withdrawal before processing"""
+    try:
+        # Check if address is valid
+        Web3.to_checksum_address(withdrawal['to_address'])
+        
+        # Check amount is positive
+        amount = float(withdrawal['amount'])
+        if amount <= 0:
+            return False, "Invalid amount"
+        
+        # Check admin balance
+        admin_balance = check_contract_balance()
+        if admin_balance < amount:
+            return False, f"Insufficient admin balance: {admin_balance}"
+        
+        return True, "Valid"
+        
+    except Exception as e:
+        return False, f"Validation error: {e}"
 
 def process_single_batch():
     """Process a single batch of withdrawals (GitHub Actions optimized)"""
@@ -235,47 +337,6 @@ def process_single_batch():
         
     except Exception as e:
         logger.error(f"❌ Error in process_single_batch: {e}")
-        def check_contract_balance():
-    """Check admin wallet token balance"""
-    try:
-        contract = get_contract()
-        admin_account = get_admin_account()
-        
-        if not contract or not admin_account:
-            return 0
-        
-        balance = contract.functions.balanceOf(admin_account.address).call()
-        decimals = contract.functions.decimals().call()
-        token_balance = balance / (10 ** decimals)
-        
-        logger.info(f"💰 Admin wallet balance: {token_balance:,.2f} tokens")
-        return token_balance
-        
-    except Exception as e:
-        logger.error(f"Error checking balance: {e}")
-        return 0
-
-def validate_withdrawal_request(withdrawal):
-    """Validate withdrawal before processing"""
-    try:
-        # Check if address is valid
-        Web3.to_checksum_address(withdrawal['to_address'])
-        
-        # Check amount is positive
-        amount = float(withdrawal['amount'])
-        if amount <= 0:
-            return False, "Invalid amount"
-        
-        # Check admin balance
-        admin_balance = check_contract_balance()
-        if admin_balance < amount:
-            return False, f"Insufficient admin balance: {admin_balance}"
-        
-        return True, "Valid"
-        
-    except Exception as e:
-        return False, f"Validation error: {e}"
-
 
 def cleanup_stuck_withdrawals():
     """Clean up withdrawals stuck in processing"""
