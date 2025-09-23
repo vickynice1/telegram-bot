@@ -5,7 +5,8 @@ import json
 import time
 import logging
 from decimal import Decimal
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
+from dateutil import parser  # Add this for robust datetime parsing
 
 # Setup logging for GitHub Actions
 logging.basicConfig(
@@ -341,7 +342,11 @@ def process_single_batch():
 def cleanup_stuck_withdrawals():
     """Clean up withdrawals stuck in processing"""
     try:
-        cutoff_time = datetime.now() - timedelta(minutes=10)
+        # Import timezone for proper datetime handling
+        from datetime import timezone
+        
+        # Create timezone-aware cutoff time
+        cutoff_time = datetime.now(timezone.utc) - timedelta(minutes=10)
         
         result = supabase.table('withdrawals').select('*').eq('status', 'processing').execute()
         
@@ -350,8 +355,22 @@ def cleanup_stuck_withdrawals():
             try:
                 processed_at = withdrawal.get('processed_at')
                 if processed_at:
-                    processed_time = datetime.fromisoformat(processed_at.replace('Z', '+00:00'))
+                    # Handle different timestamp formats from Supabase
+                    if isinstance(processed_at, str):
+                        # Remove 'Z' and add timezone info, or handle +00:00 format
+                        if processed_at.endswith('Z'):
+                            processed_at = processed_at.replace('Z', '+00:00')
+                        
+                        # Parse the timestamp (this will be timezone-aware)
+                        from dateutil import parser
+                        processed_time = parser.parse(processed_at)
+                    else:
+                        # If it's already a datetime object, ensure it's timezone-aware
+                        processed_time = processed_at
+                        if processed_time.tzinfo is None:
+                            processed_time = processed_time.replace(tzinfo=timezone.utc)
                     
+                    # Now both datetimes are timezone-aware, safe to compare
                     if processed_time < cutoff_time:
                         # Mark as failed and refund
                         supabase.table('withdrawals').update({
@@ -368,12 +387,15 @@ def cleanup_stuck_withdrawals():
                         }).execute()
                         
                         cleaned += 1
+                        logger.info(f"🧹 Cleaned stuck withdrawal {withdrawal['id']}")
                         
             except Exception as e:
                 logger.error(f"Error cleaning withdrawal {withdrawal['id']}: {e}")
         
         if cleaned > 0:
             logger.info(f"🧹 Cleaned up {cleaned} stuck withdrawals")
+        else:
+            logger.info("✅ No stuck withdrawals found")
         
     except Exception as e:
         logger.error(f"Error in cleanup: {e}")
